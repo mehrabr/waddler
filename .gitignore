@@ -1,0 +1,18 @@
+# Binary output
+waddler
+waddler.exe
+/dist/
+
+*.o
+*.a
+*.duckdb
+*.duckdb.wal
+output/
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+.env
+*.env
+testdata/output/
