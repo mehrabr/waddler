@@ -1,6 +1,6 @@
 # Binary output
-waddler
-waddler.exe
+/waddler
+/waddler.exe
 /dist/
 
 *.o
