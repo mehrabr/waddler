@@ -8,7 +8,6 @@ import (
 	"github.com/mehrabr/waddler/internal/engine"
 )
 
-// Register attaches a source to the DuckDB engine as a named view.
 func Register(eng *engine.Engine, s config.Source) error {
 	switch s.Type {
 	case "csv":
@@ -37,10 +36,27 @@ func registerFile(eng *engine.Engine, s config.Source, fn string) error {
 	return nil
 }
 
-// postgres and motherduck stubs — implemented in upcoming commits
 func registerPostgres(eng *engine.Engine, s config.Source) error {
-	return fmt.Errorf("source %q: postgres not yet implemented", s.Name)
+	if s.DSN == "" {
+		return fmt.Errorf("source %q: postgres requires a 'dsn' field", s.Name)
+	}
+	if s.Table == "" {
+		return fmt.Errorf("source %q: postgres requires a 'table' field", s.Name)
+	}
+	for _, stmt := range []string{"INSTALL postgres", "LOAD postgres"} {
+		if err := eng.Exec(stmt); err != nil {
+			return fmt.Errorf("source %q: %w", s.Name, err)
+		}
+	}
+	schema := s.Options["schema"]
+	if schema == "" {
+		schema = "public"
+	}
+	sql := fmt.Sprintf("SELECT * FROM postgres_scan('%s', '%s', '%s')", s.DSN, schema, s.Table)
+	return eng.CreateView(s.Name, sql)
 }
-func registerMotherDuck(eng *engine.Engine, s config.Source) error {
+
+// motherduck stub — implemented next
+func registerMotherDuck(_ *engine.Engine, s config.Source) error {
 	return fmt.Errorf("source %q: motherduck not yet implemented", s.Name)
 }
