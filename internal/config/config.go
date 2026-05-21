@@ -9,11 +9,13 @@ import (
 )
 
 type Pipeline struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	Sources     []Source `yaml:"sources"`
-	Transform   string   `yaml:"transform"`
-	Output      Output   `yaml:"output"`
+	Name        string      `yaml:"name"`
+	Description string      `yaml:"description"`
+	Sources     []Source    `yaml:"sources"`
+	Transform   string      `yaml:"transform"`
+	Validate    []Assertion `yaml:"validate"`
+	Output      Output      `yaml:"output"`
+	Schedule    string      `yaml:"schedule"`
 }
 
 type Source struct {
@@ -32,6 +34,20 @@ type Output struct {
 	Table       string `yaml:"table"`
 	Compression string `yaml:"compression"`
 	Mode        string `yaml:"mode"`
+}
+
+// Assertion is one data-quality rule in the validate[] block.
+type Assertion struct {
+	Name      string `yaml:"name"`
+	SQL       string `yaml:"sql"`
+	Expect    *int64 `yaml:"expect"`
+	ExpectMin *int64 `yaml:"expect_min"`
+	ExpectMax *int64 `yaml:"expect_max"`
+}
+
+// HasSchedule reports whether the pipeline has a cron schedule configured.
+func (p *Pipeline) HasSchedule() bool {
+	return strings.TrimSpace(p.Schedule) != ""
 }
 
 func Load(path string) (*Pipeline, error) {
