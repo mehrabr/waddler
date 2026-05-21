@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/robfig/cron/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/mehrabr/waddler/internal/config"
@@ -20,7 +21,7 @@ func main() {
 		Short:   "Zero-code ETL pipelines powered by DuckDB",
 		Version: version,
 	}
-	root.AddCommand(cmdRun(), cmdValidate(), cmdSources())
+	root.AddCommand(cmdRun(), cmdValidate(), cmdServe(), cmdSources())
 	if err := root.Execute(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -66,6 +67,38 @@ func cmdValidate() *cobra.Command {
 	}
 }
 
+func cmdServe() *cobra.Command {
+	return &cobra.Command{
+		Use:   "serve [pipeline.yml]",
+		Short: "Run a pipeline on its configured schedule (blocks until Ctrl+C)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := config.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if !p.HasSchedule() {
+				return fmt.Errorf(
+					"no 'schedule' field in pipeline — add e.g. schedule: \"0 6 * * *\"",
+				)
+			}
+			c := cron.New()
+			if _, err := c.AddFunc(p.Schedule, func() {
+				if _, err := runner.Run(p); err != nil {
+					slog.Error("pipeline failed", "err", err)
+				}
+			}); err != nil {
+				return fmt.Errorf("invalid cron expression %q: %w", p.Schedule, err)
+			}
+			c.Start()
+			slog.Info("scheduler started", "schedule", p.Schedule, "pipeline", p.Name)
+			fmt.Printf("⏰ Scheduler running — %s on %q. Press Ctrl+C to stop.\n",
+				p.Name, p.Schedule)
+			select {}
+		},
+	}
+}
+
 func cmdSources() *cobra.Command {
 	return &cobra.Command{
 		Use:   "sources",
@@ -81,7 +114,11 @@ func cmdSources() *cobra.Command {
 Outputs:
   parquet    — local Parquet file (path required)
   csv        — local CSV file (path required)
-  motherduck — MotherDuck cloud table (database + table required)`)
+  motherduck — MotherDuck cloud table (database + table required)
+
+Schedule field (optional):
+  Standard cron expression, e.g. "0 6 * * *" (daily at 6am).
+  Use with: waddler serve pipeline.yml`)
 		},
 	}
 }
