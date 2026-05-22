@@ -145,3 +145,50 @@ func TestLoad_FileNotFound(t *testing.T) {
 		t.Error("expected error for nonexistent file")
 	}
 }
+
+func TestLoad_WithSchedule(t *testing.T) {
+	path := writeTmp(t, `
+name: scheduled
+sources:
+  - name: s1
+    type: csv
+    path: /tmp/x.csv
+transform: SELECT * FROM s1
+schedule: "0 6 * * *"
+output:
+  type: csv
+  path: /tmp/out.csv
+`)
+	p, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.HasSchedule() {
+		t.Error("expected HasSchedule() to return true")
+	}
+}
+
+func TestLoad_WithValidation(t *testing.T) {
+	path := writeTmp(t, `
+name: validated
+sources:
+  - name: s1
+    type: csv
+    path: /tmp/x.csv
+transform: SELECT * FROM s1
+validate:
+  - name: row count positive
+    sql: SELECT COUNT(*) FROM ({transform})
+    expect_min: 1
+output:
+  type: csv
+  path: /tmp/out.csv
+`)
+	p, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Validate) != 1 {
+		t.Errorf("expected 1 validation rule, got %d", len(p.Validate))
+	}
+}
