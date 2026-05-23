@@ -67,3 +67,35 @@ func TestRun_MissingSourceFile(t *testing.T) {
 		t.Error("expected error for missing source file")
 	}
 }
+
+func TestRun_ValidationPass(t *testing.T) {
+	min := int64(1)
+	max := int64(10)
+	p := &config.Pipeline{
+		Name:      "validation-pass",
+		Sources:   []config.Source{{Name: "donations", Type: "csv", Path: testdataPath("donations.csv")}},
+		Transform: "SELECT * FROM donations WHERE amount > 0",
+		Validate: []config.Assertion{
+			{Name: "at least one row", SQL: "SELECT COUNT(*) FROM ({transform})", ExpectMin: &min},
+			{Name: "not too many rows", SQL: "SELECT COUNT(*) FROM ({transform})", ExpectMax: &max},
+		},
+		Output: config.Output{Type: "csv", Path: filepath.Join(t.TempDir(), "out.csv")},
+	}
+	if _, err := runner.Run(p); err != nil {
+		t.Fatalf("expected pass, got: %v", err)
+	}
+}
+
+func TestRun_ValidationFail(t *testing.T) {
+	zero := int64(0)
+	p := &config.Pipeline{
+		Name:      "validation-fail",
+		Sources:   []config.Source{{Name: "donations", Type: "csv", Path: testdataPath("donations.csv")}},
+		Transform: "SELECT * FROM donations",
+		Validate:  []config.Assertion{{Name: "no rows", SQL: "SELECT COUNT(*) FROM ({transform})", Expect: &zero}},
+		Output:    config.Output{Type: "csv", Path: filepath.Join(t.TempDir(), "out.csv")},
+	}
+	if _, err := runner.Run(p); err == nil {
+		t.Error("expected validation failure")
+	}
+}
