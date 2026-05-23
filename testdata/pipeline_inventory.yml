@@ -1,0 +1,35 @@
+name: weekly-inventory-report
+description: Join products and orders to produce restocking report
+
+sources:
+  - name: products
+    type: csv
+    path: testdata/products.csv
+  - name: orders
+    type: csv
+    path: testdata/orders.csv
+
+transform: |
+  SELECT
+    p.product_id,
+    p.name,
+    p.category,
+    p.unit_price,
+    COALESCE(SUM(o.quantity), 0)                           AS total_ordered,
+    ROUND(p.unit_price * COALESCE(SUM(o.quantity), 0), 2) AS revenue
+  FROM products p
+  LEFT JOIN orders o USING (product_id)
+  GROUP BY p.product_id, p.name, p.category, p.unit_price
+  ORDER BY revenue DESC
+
+validate:
+  - name: no negative quantities
+    sql: SELECT COUNT(*) FROM ({transform}) WHERE total_ordered < 0
+    expect: 0
+  - name: at least one product
+    sql: SELECT COUNT(*) FROM ({transform})
+    expect_min: 1
+
+output:
+  type: csv
+  path: output/inventory_report.csv

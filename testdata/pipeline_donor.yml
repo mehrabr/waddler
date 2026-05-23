@@ -1,0 +1,33 @@
+name: monthly-donor-report
+description: Clean and aggregate donation records for board meeting
+
+sources:
+  - name: donations
+    type: csv
+    path: testdata/donations.csv
+  - name: donors
+    type: csv
+    path: testdata/donors.csv
+
+transform: |
+  SELECT
+    d.donor_id,
+    dn.name,
+    dn.email,
+    ROUND(SUM(d.amount), 2)        AS total_donated,
+    COUNT(*)                       AS donation_count,
+    MAX(d.donated_at::DATE)        AS last_gift_date,
+    CASE
+      WHEN SUM(d.amount) >= 1000 THEN 'major'
+      WHEN SUM(d.amount) >= 100  THEN 'regular'
+      ELSE 'small'
+    END                            AS donor_tier
+  FROM donations d
+  JOIN donors dn USING (donor_id)
+  WHERE d.amount > 0
+  GROUP BY ALL
+  ORDER BY total_donated DESC
+
+output:
+  type: parquet
+  path: output/donor_report.parquet
