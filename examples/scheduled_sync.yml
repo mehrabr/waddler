@@ -1,0 +1,38 @@
+name: nightly-donor-sync
+description: |
+  Run every night at 2am and write cleaned donor data to MotherDuck
+  for the analytics dashboard.
+
+schedule: "0 2 * * *"
+
+sources:
+  - name: donations
+    type: csv
+    path: /data/exports/donations_latest.csv
+  - name: donors
+    type: csv
+    path: /data/exports/donors_latest.csv
+
+transform: |
+  SELECT
+    d.donor_id,
+    dn.name,
+    dn.email,
+    ROUND(SUM(d.amount), 2) AS total_donated,
+    COUNT(*)                AS donation_count,
+    MAX(d.donated_at::DATE) AS last_gift_date
+  FROM donations d
+  JOIN donors dn USING (donor_id)
+  WHERE d.amount > 0
+  GROUP BY ALL
+
+validate:
+  - name: no negative totals
+    sql: SELECT COUNT(*) FROM ({transform}) WHERE total_donated < 0
+    expect: 0
+
+output:
+  type: motherduck
+  database: analytics
+  table: donor_summary
+  mode: replace

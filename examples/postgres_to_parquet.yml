@@ -1,0 +1,25 @@
+name: crm-export
+description: |
+  Pull the customers table from Postgres, filter active accounts,
+  and dump to Parquet for offline analysis.
+
+sources:
+  - name: customers
+    type: postgres
+    dsn: "host=localhost dbname=crm user=readonly password=secret"
+    table: customers
+
+transform: |
+  SELECT
+    customer_id,
+    email,
+    plan,
+    created_at::DATE AS signup_date
+  FROM customers
+  WHERE status = 'active'
+  ORDER BY created_at DESC
+
+output:
+  type: parquet
+  path: output/active_customers.parquet
+  compression: zstd
