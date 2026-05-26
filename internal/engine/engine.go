@@ -59,3 +59,17 @@ func (e *Engine) ScalarInt64(query string) (int64, error) {
 }
 
 func (e *Engine) Close() error { return e.db.Close() }
+
+// NewWithFile opens a file-backed DuckDB instead of in-memory.
+// The database persists after the run, so you can inspect it
+// with the DuckDB CLI if something goes wrong.
+func NewWithFile(path string) (*Engine, error) {
+	db, err := sql.Open("duckdb", path)
+	if err != nil {
+		return nil, fmt.Errorf("engine: open %q: %w", path, err)
+	}
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("engine: ping: %w", err)
+	}
+	return &Engine{db: db}, nil
+}
