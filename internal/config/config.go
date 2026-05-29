@@ -19,12 +19,15 @@ type Pipeline struct {
 }
 
 type Source struct {
-	Name    string            `yaml:"name"`
-	Type    string            `yaml:"type"`
-	Path    string            `yaml:"path"`
-	DSN     string            `yaml:"dsn"`
-	Table   string            `yaml:"table"`
-	Options map[string]string `yaml:"options"`
+	Name     string            `yaml:"name"`
+	Type     string            `yaml:"type"`
+	Path     string            `yaml:"path"`     // csv, json, parquet
+	DSN      string            `yaml:"dsn"`      // postgres
+	Table    string            `yaml:"table"`    // postgres, motherduck, quack
+	Database string            `yaml:"database"` // quack
+	URL      string            `yaml:"url"`      // quack
+	Token    string            `yaml:"token"`    // quack — must use ${VAR} syntax
+	Options  map[string]string `yaml:"options"`
 }
 
 type Output struct {
@@ -34,6 +37,8 @@ type Output struct {
 	Table       string `yaml:"table"`
 	Compression string `yaml:"compression"`
 	Mode        string `yaml:"mode"`
+	URL         string `yaml:"url"`   // quack
+	Token       string `yaml:"token"` // quack — must use ${VAR} syntax
 }
 
 // Assertion is one data-quality rule in the validate[] block.
@@ -81,17 +86,53 @@ func validate(p *Pipeline) error {
 			return fmt.Errorf("duplicate source name %q — each source name must be unique", s.Name)
 		}
 		seen[s.Name] = true
-		validTypes := map[string]bool{"csv": true, "json": true, "parquet": true, "postgres": true, "motherduck": true}
+		validTypes := map[string]bool{
+			"csv": true, "json": true, "parquet": true,
+			"postgres": true, "motherduck": true, "quack": true,
+		}
 		if !validTypes[s.Type] {
-			return fmt.Errorf("source %q has unknown type %q (valid: csv, json, parquet, postgres, motherduck)", s.Name, s.Type)
+			return fmt.Errorf("source %q has unknown type %q (valid: csv, json, parquet, postgres, motherduck, quack)", s.Name, s.Type)
 		}
 		if (s.Type == "csv" || s.Type == "json" || s.Type == "parquet") && s.Path == "" {
 			return fmt.Errorf("source %q (type=%s) requires a 'path'", s.Name, s.Type)
 		}
+		if s.Type == "quack" {
+			if s.URL == "" {
+				return fmt.Errorf("source %q: quack requires a 'url' field", s.Name)
+			}
+			if s.Table == "" {
+				return fmt.Errorf("source %q: quack requires a 'table' field", s.Name)
+			}
+			if err := validateToken(fmt.Sprintf("source %q token", s.Name), s.Token); err != nil {
+				return err
+			}
+		}
 	}
-	validOutputs := map[string]bool{"parquet": true, "csv": true, "motherduck": true}
+	validOutputs := map[string]bool{"parquet": true, "csv": true, "motherduck": true, "quack": true}
 	if !validOutputs[p.Output.Type] {
-		return fmt.Errorf("output type %q is not supported (valid: parquet, csv, motherduck)", p.Output.Type)
+		return fmt.Errorf("output type %q is not supported (valid: parquet, csv, motherduck, quack)", p.Output.Type)
+	}
+	if p.Output.Type == "quack" {
+		if p.Output.URL == "" {
+			return fmt.Errorf("output: quack requires a 'url' field")
+		}
+		if p.Output.Table == "" {
+			return fmt.Errorf("output: quack requires a 'table' field")
+		}
+		if err := validateToken("output.token", p.Output.Token); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateToken rejects bare literal tokens — they must use ${VAR} interpolation.
+func validateToken(field, token string) error {
+	if token == "" {
+		return nil
+	}
+	if !strings.Contains(token, "${") {
+		return fmt.Errorf("%s must reference an environment variable, e.g. token: ${QUACK_TOKEN} — never put secrets in YAML files", field)
 	}
 	return nil
 }

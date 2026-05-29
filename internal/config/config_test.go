@@ -146,6 +146,117 @@ func TestLoad_FileNotFound(t *testing.T) {
 	}
 }
 
+func TestLoad_QuackSource_Valid(t *testing.T) {
+	path := writeTmp(t, `
+name: quack-src
+sources:
+  - name: remote
+    type: quack
+    url: quack:localhost:9494
+    token: ${QUACK_TOKEN}
+    table: donor_report
+transform: SELECT * FROM remote
+output:
+  type: csv
+  path: /tmp/out.csv
+`)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("expected valid quack source, got: %v", err)
+	}
+}
+
+func TestLoad_QuackSource_MissingURL(t *testing.T) {
+	path := writeTmp(t, `
+name: quack-no-url
+sources:
+  - name: remote
+    type: quack
+    table: donor_report
+transform: SELECT * FROM remote
+output:
+  type: csv
+  path: /tmp/out.csv
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error for missing url")
+	}
+}
+
+func TestLoad_QuackSource_MissingTable(t *testing.T) {
+	path := writeTmp(t, `
+name: quack-no-table
+sources:
+  - name: remote
+    type: quack
+    url: quack:localhost:9494
+transform: SELECT * FROM remote
+output:
+  type: csv
+  path: /tmp/out.csv
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error for missing table")
+	}
+}
+
+func TestLoad_QuackSource_BareToken(t *testing.T) {
+	path := writeTmp(t, `
+name: quack-bare-token
+sources:
+  - name: remote
+    type: quack
+    url: quack:localhost:9494
+    token: supersecrettoken
+    table: donor_report
+transform: SELECT * FROM remote
+output:
+  type: csv
+  path: /tmp/out.csv
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Error("expected error for bare literal token")
+	}
+}
+
+func TestLoad_QuackOutput_Valid(t *testing.T) {
+	path := writeTmp(t, `
+name: quack-out
+sources:
+  - name: s1
+    type: csv
+    path: /tmp/x.csv
+transform: SELECT * FROM s1
+output:
+  type: quack
+  url: quack:localhost:9494
+  token: ${QUACK_TOKEN}
+  table: donor_report
+`)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("expected valid quack output, got: %v", err)
+	}
+}
+
+func TestLoad_QuackOutput_BareToken(t *testing.T) {
+	path := writeTmp(t, `
+name: quack-out-bare
+sources:
+  - name: s1
+    type: csv
+    path: /tmp/x.csv
+transform: SELECT * FROM s1
+output:
+  type: quack
+  url: quack:localhost:9494
+  token: literaltoken
+  table: donor_report
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error for bare literal output token")
+	}
+}
+
 func TestLoad_WithSchedule(t *testing.T) {
 	path := writeTmp(t, `
 name: scheduled

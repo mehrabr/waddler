@@ -32,6 +32,8 @@ func Run(p *config.Pipeline) (*Result, error) {
 
 	log.Info("starting pipeline", "name", p.Name)
 
+	warnNonLocalQuack(p, log)
+
 	eng, err := engine.New()
 	if err != nil {
 		return nil, fmt.Errorf("runner: open engine: %w", err)
@@ -77,6 +79,25 @@ func Run(p *config.Pipeline) (*Result, error) {
 		"duration", result.Duration.Round(time.Millisecond),
 	)
 	return result, nil
+}
+
+// warnNonLocalQuack logs an SSL warning for any quack URL that isn't localhost.
+func warnNonLocalQuack(p *config.Pipeline, log *slog.Logger) {
+	check := func(url string) {
+		lower := strings.ToLower(url)
+		local := strings.Contains(lower, "localhost") || strings.Contains(lower, "127.0.0.1")
+		if !local {
+			log.Warn("WARNING: quack URL is non-local. Use nginx with SSL termination in production. See README for a working nginx config.", "url", url)
+		}
+	}
+	for _, s := range p.Sources {
+		if s.Type == "quack" {
+			check(s.URL)
+		}
+	}
+	if p.Output.Type == "quack" {
+		check(p.Output.URL)
+	}
 }
 
 // runAssertions runs each validate[] rule. All failures are collected

@@ -20,6 +20,8 @@ func Register(eng *engine.Engine, s config.Source) error {
 		return registerPostgres(eng, s)
 	case "motherduck":
 		return registerMotherDuck(eng, s)
+	case "quack":
+		return registerQuack(eng, s)
 	default:
 		return fmt.Errorf("source: unknown type %q", s.Type)
 	}
@@ -56,6 +58,32 @@ func registerPostgres(eng *engine.Engine, s config.Source) error {
 	return eng.CreateView(s.Name, sql)
 }
 
+// registerQuack reads a table from a remote waddler relay or any Quack-compatible server.
+// The ATTACH alias is "quack_<source.name>" to avoid collisions with other sources.
+func registerQuack(eng *engine.Engine, s config.Source) error {
+	token, err := expandToken(s.Token)
+	if err != nil {
+		return fmt.Errorf("source %q: %w", s.Name, err)
+	}
+	for _, stmt := range []string{"INSTALL quack", "LOAD quack"} {
+		if err := eng.Exec(stmt); err != nil {
+			return fmt.Errorf("source %q: %w", s.Name, err)
+		}
+	}
+	alias := "quack_" + s.Name
+	attachSQL := fmt.Sprintf("ATTACH '%s?token=%s' AS %s (TYPE quack)", s.URL, token, alias)
+	if err := eng.Exec(attachSQL); err != nil {
+		return fmt.Errorf("source %q: quack attach: %w", s.Name, err)
+	}
+	var selectSQL string
+	if s.Database != "" {
+		selectSQL = fmt.Sprintf("SELECT * FROM %s.%s.%s", alias, s.Database, s.Table)
+	} else {
+		selectSQL = fmt.Sprintf("SELECT * FROM %s.%s", alias, s.Table)
+	}
+	return eng.CreateView(s.Name, selectSQL)
+}
+
 // registerMotherDuck reads from a MotherDuck cloud table.
 // The ATTACH alias is "md_<source.name>" so two MotherDuck sources
 // in the same pipeline get distinct aliases.
@@ -80,4 +108,21 @@ func registerMotherDuck(eng *engine.Engine, s config.Source) error {
 		return fmt.Errorf("source %q: attach motherduck: %w", s.Name, err)
 	}
 	return eng.CreateView(s.Name, fmt.Sprintf("SELECT * FROM %s.%s", alias, s.Table))
+}
+
+// expandToken resolves ${VAR} references in a token string.
+// Returns an error if a referenced variable is not set.
+func expandToken(token string) (string, error) {
+	var missing string
+	result := os.Expand(token, func(key string) string {
+		val := os.Getenv(key)
+		if val == "" && missing == "" {
+			missing = key
+		}
+		return val
+	})
+	if missing != "" {
+		return "", fmt.Errorf("environment variable %q is not set", missing)
+	}
+	return result, nil
 }
