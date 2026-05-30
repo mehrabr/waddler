@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/robfig/cron/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/mehrabr/waddler/internal/config"
+	"github.com/mehrabr/waddler/internal/relay"
 	"github.com/mehrabr/waddler/internal/runner"
 )
 
@@ -21,7 +23,7 @@ func main() {
 		Short:   "Zero-code ETL pipelines powered by DuckDB",
 		Version: version,
 	}
-	root.AddCommand(cmdRun(), cmdValidate(), cmdServe(), cmdSources())
+	root.AddCommand(cmdRun(), cmdValidate(), cmdServe(), cmdSources(), cmdRelay())
 	if err := root.Execute(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -110,17 +112,75 @@ func cmdSources() *cobra.Command {
   parquet    — local Parquet file (path required)
   postgres   — PostgreSQL table (dsn + table required)
   motherduck — MotherDuck cloud table (MOTHERDUCK_TOKEN env + table required)
+  quack      — remote waddler relay or Quack server (url + table required)
 
 Outputs:
   parquet    — local Parquet file (path required)
   csv        — local CSV file (path required)
   motherduck — MotherDuck cloud table (database + table required)
+  quack      — remote waddler relay or Quack server (url + table required)
 
 Schedule field (optional):
   Standard cron expression, e.g. "0 6 * * *" (daily at 6am).
   Use with: waddler serve pipeline.yml`)
 		},
 	}
+}
+
+func cmdRelay() *cobra.Command {
+	var (
+		dbPath           string
+		port             int
+		tokenFile        string
+		allowedPipelines string
+		maxRows          int64
+	)
+
+	cmd := &cobra.Command{
+		Use:   "relay",
+		Short: "Start a Quack-backed hub that accepts pipeline writes from remote waddler instances",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			token, err := relay.LoadOrCreateToken(tokenFile)
+			if err != nil {
+				return err
+			}
+
+			cfg := relay.Config{
+				DBPath:    dbPath,
+				Port:      port,
+				TokenFile: tokenFile,
+				MaxRows:   maxRows,
+			}
+			if allowedPipelines != "" {
+				for _, name := range strings.Split(allowedPipelines, ",") {
+					cfg.AllowedPipelines = append(cfg.AllowedPipelines, strings.TrimSpace(name))
+				}
+			}
+
+			if len(cfg.AllowedPipelines) == 0 {
+				slog.Warn("WARNING: no --allowed-pipelines set. Any client with the token can write any pipeline to this relay. Set --allowed-pipelines in production.")
+			}
+
+			slog.Info("relay starting",
+				"db", dbPath,
+				"port", port,
+				"token_file", tokenFile,
+				"max_rows", maxRows,
+			)
+			fmt.Printf("Token written to %s\n", tokenFile)
+			_ = token
+
+			return relay.Serve(cfg)
+		},
+	}
+
+	cmd.Flags().StringVar(&dbPath, "db", "./hub.duckdb", "path to the persistent DuckDB file")
+	cmd.Flags().IntVar(&port, "port", 9494, "port to listen on")
+	cmd.Flags().StringVar(&tokenFile, "token-file", "./relay.token", "file containing the relay auth token (created on first start)")
+	cmd.Flags().StringVar(&allowedPipelines, "allowed-pipelines", "", "comma-separated list of pipeline names allowed to write to this relay")
+	cmd.Flags().Int64Var(&maxRows, "max-rows", 10_000_000, "maximum rows accepted per pipeline run")
+
+	return cmd
 }
 
 // Build:   CGO_ENABLED=1 go build -o waddler ./cmd/waddler
