@@ -75,9 +75,13 @@ func Serve(cfg Config) error {
 	}
 	defer eng.Close()
 
+	isNew := !fileExists(cfg.TokenFile)
 	token, err := LoadOrCreateToken(cfg.TokenFile)
 	if err != nil {
 		return err
+	}
+	if isNew {
+		fmt.Printf("Token created and written to %s\n", cfg.TokenFile)
 	}
 
 	mux := http.NewServeMux()
@@ -157,6 +161,11 @@ func handleWrite(w http.ResponseWriter, r *http.Request, eng *engine.Engine, cfg
 		"duration", time.Since(start).Round(time.Millisecond),
 	)
 	w.WriteHeader(http.StatusOK)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func generateToken() (string, error) {

@@ -140,11 +140,6 @@ func cmdRelay() *cobra.Command {
 		Use:   "relay",
 		Short: "Start a Quack-backed hub that accepts pipeline writes from remote waddler instances",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			token, err := relay.LoadOrCreateToken(tokenFile)
-			if err != nil {
-				return err
-			}
-
 			cfg := relay.Config{
 				DBPath:    dbPath,
 				Port:      port,
@@ -167,9 +162,6 @@ func cmdRelay() *cobra.Command {
 				"token_file", tokenFile,
 				"max_rows", maxRows,
 			)
-			fmt.Printf("Token written to %s\n", tokenFile)
-			_ = token
-
 			return relay.Serve(cfg)
 		},
 	}
