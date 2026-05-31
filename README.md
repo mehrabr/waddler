@@ -78,6 +78,8 @@ schedule: "0 6 * * *"
 
 `motherduck` takes `database` and `table`. Replaces the table by default. Set `mode: append` to insert rows instead.
 
+`quack` takes a `url` and `table`. The token must reference an environment variable (`token: ${RELAY_TOKEN}`) — the validator rejects bare literals. Non-local URLs log a warning reminding you to put nginx in front.
+
 ## Validation
 
 The `validate` block runs SQL assertions against your transform result before anything gets written. All failures are collected and reported together, so you see everything at once rather than fixing one thing at a time.
@@ -107,6 +109,54 @@ Add a `schedule` field and use `waddler serve` instead of `waddler run`. It bloc
 schedule: "0 6 * * *"   # 6am daily
 ```
 
+## Relay
+
+The relay lets multiple waddler instances push pipeline results into a shared DuckDB file on a central server. The main use case is a regional org where each branch office runs waddler locally and pushes weekly data to a hub that a coordinator can query in one place.
+
+Start the hub on your central server:
+
+```bash
+waddler relay \
+  --db ./hub.duckdb \
+  --port 9494 \
+  --token-file ./relay.token \
+  --allowed-pipelines donor_report,weekly_sync
+```
+
+On first start it generates a random token and writes it to `--token-file`. Hand that token to each branch office as `RELAY_TOKEN`. Each branch pipeline then uses a quack output pointing at the hub:
+
+```yaml
+output:
+  type: quack
+  url: quack:hub.example.com:9494
+  token: ${RELAY_TOKEN}
+  table: donor_report
+  mode: replace
+```
+
+The relay enforces the allowlist and a row limit (default 10M, set with `--max-rows`). Rejected runs are logged server-side with a reason. Accepted runs are logged with pipeline name, row count, and duration.
+
+**SSL:** put nginx in front for anything beyond localhost. Here's a minimal config:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name hub.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/hub.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hub.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:9494;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+The relay is the self-hosted option. If you want managed storage, replication, or access controls beyond a token, MotherDuck is the right call instead.
+
+See [`examples/relay_hub.yml`](examples/relay_hub.yml) and [`examples/relay_client.yml`](examples/relay_client.yml) for the full setup.
+
 ## Building from source
 
 ```bash
@@ -122,6 +172,8 @@ CGO_ENABLED=1 go build -o waddler ./cmd/waddler
 - [`examples/donor_report.yml`](examples/donor_report.yml) - two CSVs joined and aggregated to Parquet
 - [`examples/scheduled_sync.yml`](examples/scheduled_sync.yml) - nightly cron sync to MotherDuck with validation
 - [`examples/postgres_to_parquet.yml`](examples/postgres_to_parquet.yml) - Postgres table exported to zstd Parquet
+- [`examples/relay_hub.yml`](examples/relay_hub.yml) - hub server setup notes
+- [`examples/relay_client.yml`](examples/relay_client.yml) - branch office client pushing to the hub
 
 ---
 

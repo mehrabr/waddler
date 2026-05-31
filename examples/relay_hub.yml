@@ -1,0 +1,11 @@
+# relay_hub.yml
+#
+# Run this on the central server with:
+#   waddler relay --db ./hub.duckdb --port 9494 --token-file ./relay.token \
+#                 --allowed-pipelines donor_report,weekly_sync
+#
+# The token is generated on first start and written to relay.token.
+# Hand that token to each branch office so they can configure relay_client.yml.
+#
+# The hub database persists across restarts. Query it directly with the DuckDB CLI:
+#   duckdb hub.duckdb "SELECT * FROM main.donor_report ORDER BY total_donated DESC"

@@ -1,0 +1,40 @@
+name: donor_report
+description: |
+  Weekly donor summary from a branch office.
+  Runs every Monday at 7am and pushes results to the central relay hub.
+
+schedule: "0 7 * * 1"
+
+sources:
+  - name: donations
+    type: csv
+    path: /data/exports/donations_this_week.csv
+
+  - name: donors
+    type: csv
+    path: /data/exports/donors.csv
+
+transform: |
+  SELECT
+    d.donor_id,
+    dn.name,
+    dn.email,
+    ROUND(SUM(d.amount), 2) AS total_donated,
+    COUNT(*)                AS donation_count,
+    MAX(d.donated_at::DATE) AS last_gift_date
+  FROM donations d
+  JOIN donors dn USING (donor_id)
+  WHERE d.amount > 0
+  GROUP BY ALL
+
+validate:
+  - name: no negative totals
+    sql: SELECT COUNT(*) FROM ({transform}) WHERE total_donated < 0
+    expect: 0
+
+output:
+  type: quack
+  url: quack:hub.example.com:9494
+  token: ${RELAY_TOKEN}
+  table: donor_report
+  mode: replace
