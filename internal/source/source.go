@@ -6,8 +6,11 @@ import (
 
 	"github.com/mehrabr/waddler/internal/config"
 	"github.com/mehrabr/waddler/internal/engine"
+	"github.com/mehrabr/waddler/internal/secret"
+	"github.com/mehrabr/waddler/internal/sqlutil"
 )
 
+// Register makes a source available to the transform as a view named s.Name.
 func Register(eng *engine.Engine, s config.Source) error {
 	switch s.Type {
 	case "csv":
@@ -31,7 +34,8 @@ func registerFile(eng *engine.Engine, s config.Source, fn string) error {
 	if _, err := os.Stat(s.Path); os.IsNotExist(err) {
 		return fmt.Errorf("source %q: file not found: %s", s.Name, s.Path)
 	}
-	sql := fmt.Sprintf("SELECT * FROM %s('%s')", fn, s.Path)
+	// Path is quoted as a literal so spaces / quotes in the path are safe.
+	sql := fmt.Sprintf("SELECT * FROM %s(%s)", fn, sqlutil.QuoteLiteral(s.Path))
 	if err := eng.CreateView(s.Name, sql); err != nil {
 		return fmt.Errorf("source %q: %w", s.Name, err)
 	}
@@ -45,84 +49,107 @@ func registerPostgres(eng *engine.Engine, s config.Source) error {
 	if s.Table == "" {
 		return fmt.Errorf("source %q: postgres requires a 'table' field", s.Name)
 	}
+	dsn, err := secret.Expand(s.DSN) // allow dsn: ${CRM_DSN}
+	if err != nil {
+		return fmt.Errorf("source %q: %w", s.Name, err)
+	}
 	for _, stmt := range []string{"INSTALL postgres", "LOAD postgres"} {
 		if err := eng.Exec(stmt); err != nil {
-			return fmt.Errorf("source %q: %w", s.Name, err)
+			return fmt.Errorf("source %q: load postgres extension: %w", s.Name, err)
 		}
 	}
 	schema := s.Options["schema"]
 	if schema == "" {
 		schema = "public"
 	}
-	sql := fmt.Sprintf("SELECT * FROM postgres_scan('%s', '%s', '%s')", s.DSN, schema, s.Table)
-	return eng.CreateView(s.Name, sql)
+	sql := fmt.Sprintf(
+		"SELECT * FROM postgres_scan(%s, %s, %s)",
+		sqlutil.QuoteLiteral(dsn), sqlutil.QuoteLiteral(schema), sqlutil.QuoteLiteral(s.Table),
+	)
+	if err := eng.CreateView(s.Name, sql); err != nil {
+		return fmt.Errorf("source %q: %w", s.Name, err)
+	}
+	return nil
 }
 
-// registerQuack reads a table from a remote waddler relay or any Quack-compatible server.
-// The ATTACH alias is "quack_<source.name>" to avoid collisions with other sources.
+// registerMotherDuck reads from a MotherDuck cloud table. The ATTACH alias is
+// "md_<source.name>" so two MotherDuck sources in one pipeline get distinct
+// aliases. The token comes from the source's token: ${VAR} field, or the
+// MOTHERDUCK_TOKEN environment variable.
+func registerMotherDuck(eng *engine.Engine, s config.Source) error {
+	if s.Table == "" {
+		return fmt.Errorf("source %q: motherduck requires a 'table' field", s.Name)
+	}
+	token, err := motherduckToken(s.Token)
+	if err != nil {
+		return fmt.Errorf("source %q: %w", s.Name, err)
+	}
+	dbName := s.Database
+	if dbName == "" {
+		dbName = "my_db"
+	}
+	alias := "md_" + s.Name
+	conn := fmt.Sprintf("md:%s?motherduck_token=%s", dbName, token)
+	attachSQL := fmt.Sprintf("ATTACH %s AS %s", sqlutil.QuoteLiteral(conn), sqlutil.QuoteIdent(alias))
+	if err := eng.Exec(attachSQL); err != nil {
+		return fmt.Errorf("source %q: attach motherduck (check token and database name): %w", s.Name, err)
+	}
+	selectSQL := fmt.Sprintf("SELECT * FROM %s.%s", sqlutil.QuoteIdent(alias), sqlutil.QuoteIdent(s.Table))
+	return eng.CreateView(s.Name, selectSQL)
+}
+
+// registerQuack reads a table from a DuckDB hub over the native Quack protocol
+// (a `waddler hub`, or any quack_serve endpoint). The ATTACH alias is
+// "quack_<source.name>".
 func registerQuack(eng *engine.Engine, s config.Source) error {
-	token, err := expandToken(s.Token)
+	if s.Table == "" {
+		return fmt.Errorf("source %q: quack requires a 'table' field", s.Name)
+	}
+	if s.URL == "" {
+		return fmt.Errorf("source %q: quack requires a 'url' field (e.g. quack:hub.example.com:9494)", s.Name)
+	}
+	if err := eng.RequireDuckDB(1, 5, 3); err != nil {
+		return fmt.Errorf("source %q: %w", s.Name, err)
+	}
+	token, err := quackToken(s.Token)
 	if err != nil {
 		return fmt.Errorf("source %q: %w", s.Name, err)
 	}
 	for _, stmt := range []string{"INSTALL quack", "LOAD quack"} {
 		if err := eng.Exec(stmt); err != nil {
-			return fmt.Errorf("source %q: %w", s.Name, err)
+			return fmt.Errorf("source %q: load quack extension: %w", s.Name, err)
 		}
 	}
 	alias := "quack_" + s.Name
-	attachSQL := fmt.Sprintf("ATTACH '%s?token=%s' AS %s (TYPE quack)", s.URL, token, alias)
+	attachSQL := fmt.Sprintf("ATTACH %s AS %s (TYPE quack, TOKEN %s)",
+		sqlutil.QuoteLiteral(s.URL), sqlutil.QuoteIdent(alias), sqlutil.QuoteLiteral(token))
 	if err := eng.Exec(attachSQL); err != nil {
-		return fmt.Errorf("source %q: quack attach: %w", s.Name, err)
+		return fmt.Errorf("source %q: attach quack hub (check url and token): %w", s.Name, err)
 	}
-	var selectSQL string
-	if s.Database != "" {
-		selectSQL = fmt.Sprintf("SELECT * FROM %s.%s.%s", alias, s.Database, s.Table)
-	} else {
-		selectSQL = fmt.Sprintf("SELECT * FROM %s.%s", alias, s.Table)
-	}
+	selectSQL := fmt.Sprintf("SELECT * FROM %s.main.%s", sqlutil.QuoteIdent(alias), sqlutil.QuoteIdent(s.Table))
 	return eng.CreateView(s.Name, selectSQL)
 }
 
-// registerMotherDuck reads from a MotherDuck cloud table.
-// The ATTACH alias is "md_<source.name>" so two MotherDuck sources
-// in the same pipeline get distinct aliases.
-func registerMotherDuck(eng *engine.Engine, s config.Source) error {
-	token := s.Options["token"]
-	if token == "" {
-		token = os.Getenv("MOTHERDUCK_TOKEN")
+// motherduckToken resolves a token from the (optional) ${VAR} field, falling
+// back to the MOTHERDUCK_TOKEN environment variable.
+func motherduckToken(field string) (string, error) {
+	if field != "" {
+		return secret.Expand(field)
 	}
-	if token == "" {
-		return fmt.Errorf("source %q: set MOTHERDUCK_TOKEN or options.token", s.Name)
+	if tok := os.Getenv("MOTHERDUCK_TOKEN"); tok != "" {
+		return tok, nil
 	}
-	if s.Table == "" {
-		return fmt.Errorf("source %q: motherduck requires a 'table' field", s.Name)
-	}
-	dbName := s.Options["database"]
-	if dbName == "" {
-		dbName = "my_db"
-	}
-	alias := "md_" + s.Name
-	attachSQL := fmt.Sprintf("ATTACH 'md:%s?motherduck_token=%s' AS %s", dbName, token, alias)
-	if err := eng.Exec(attachSQL); err != nil {
-		return fmt.Errorf("source %q: attach motherduck: %w", s.Name, err)
-	}
-	return eng.CreateView(s.Name, fmt.Sprintf("SELECT * FROM %s.%s", alias, s.Table))
+	return "", fmt.Errorf("set the MOTHERDUCK_TOKEN environment variable, or a token: ${VAR} field")
 }
 
-// expandToken resolves ${VAR} references in a token string.
-// Returns an error if a referenced variable is not set.
-func expandToken(token string) (string, error) {
-	var missing string
-	result := os.Expand(token, func(key string) string {
-		val := os.Getenv(key)
-		if val == "" && missing == "" {
-			missing = key
-		}
-		return val
-	})
-	if missing != "" {
-		return "", fmt.Errorf("environment variable %q is not set", missing)
+// quackToken resolves a token from the (optional) ${VAR} field, falling back to
+// the WADDLER_QUACK_TOKEN environment variable.
+func quackToken(field string) (string, error) {
+	if field != "" {
+		return secret.Expand(field)
 	}
-	return result, nil
+	if tok := os.Getenv("WADDLER_QUACK_TOKEN"); tok != "" {
+		return tok, nil
+	}
+	return "", fmt.Errorf("set the WADDLER_QUACK_TOKEN environment variable, or a token: ${VAR} field")
 }
