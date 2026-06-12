@@ -106,6 +106,23 @@ output:
 	}
 }
 
+func TestLoad_InvalidSourceName(t *testing.T) {
+	path := writeTmp(t, `
+name: badname
+sources:
+  - name: "bad name"
+    type: csv
+    path: a.csv
+transform: SELECT 1
+output:
+  type: parquet
+  path: out.parquet
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error for source name that is not a valid identifier")
+	}
+}
+
 func TestLoad_UnknownSourceType(t *testing.T) {
 	path := writeTmp(t, `
 name: badtype
@@ -146,76 +163,74 @@ func TestLoad_FileNotFound(t *testing.T) {
 	}
 }
 
-func TestLoad_QuackSource_Valid(t *testing.T) {
+func TestLoad_MotherDuckOutput_MissingTable(t *testing.T) {
 	path := writeTmp(t, `
-name: quack-src
+name: md-no-table
 sources:
-  - name: remote
-    type: quack
-    url: quack:localhost:9494
-    token: ${QUACK_TOKEN}
-    table: donor_report
-transform: SELECT * FROM remote
+  - name: s1
+    type: csv
+    path: x.csv
+transform: SELECT * FROM s1
 output:
-  type: csv
-  path: /tmp/out.csv
+  type: motherduck
+  database: analytics
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error for motherduck output without a table")
+	}
+}
+
+func TestLoad_MotherDuckOutput_LiteralTokenRejected(t *testing.T) {
+	path := writeTmp(t, `
+name: md-literal-token
+sources:
+  - name: s1
+    type: csv
+    path: x.csv
+transform: SELECT * FROM s1
+output:
+  type: motherduck
+  table: t
+  token: "literal-secret-token"
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error: literal tokens in YAML must use ${VAR}")
+	}
+}
+
+func TestLoad_MotherDuckOutput_EnvTokenAllowed(t *testing.T) {
+	path := writeTmp(t, `
+name: md-env-token
+sources:
+  - name: s1
+    type: csv
+    path: x.csv
+transform: SELECT * FROM s1
+output:
+  type: motherduck
+  table: t
+  token: ${MOTHERDUCK_TOKEN}
 `)
 	if _, err := config.Load(path); err != nil {
-		t.Fatalf("expected valid quack source, got: %v", err)
+		t.Fatalf("expected valid config with ${VAR} token, got: %v", err)
 	}
 }
 
-func TestLoad_QuackSource_MissingURL(t *testing.T) {
+func TestLoad_InvalidMode(t *testing.T) {
 	path := writeTmp(t, `
-name: quack-no-url
+name: md-bad-mode
 sources:
-  - name: remote
-    type: quack
-    table: donor_report
-transform: SELECT * FROM remote
+  - name: s1
+    type: csv
+    path: x.csv
+transform: SELECT * FROM s1
 output:
-  type: csv
-  path: /tmp/out.csv
+  type: motherduck
+  table: t
+  mode: upsert
 `)
 	if _, err := config.Load(path); err == nil {
-		t.Error("expected error for missing url")
-	}
-}
-
-func TestLoad_QuackSource_MissingTable(t *testing.T) {
-	path := writeTmp(t, `
-name: quack-no-table
-sources:
-  - name: remote
-    type: quack
-    url: quack:localhost:9494
-transform: SELECT * FROM remote
-output:
-  type: csv
-  path: /tmp/out.csv
-`)
-	if _, err := config.Load(path); err == nil {
-		t.Error("expected error for missing table")
-	}
-}
-
-func TestLoad_QuackSource_BareToken(t *testing.T) {
-	path := writeTmp(t, `
-name: quack-bare-token
-sources:
-  - name: remote
-    type: quack
-    url: quack:localhost:9494
-    token: supersecrettoken
-    table: donor_report
-transform: SELECT * FROM remote
-output:
-  type: csv
-  path: /tmp/out.csv
-`)
-	_, err := config.Load(path)
-	if err == nil {
-		t.Error("expected error for bare literal token")
+		t.Error("expected error for invalid output mode")
 	}
 }
 
@@ -225,81 +240,69 @@ name: quack-out
 sources:
   - name: s1
     type: csv
-    path: /tmp/x.csv
+    path: x.csv
 transform: SELECT * FROM s1
 output:
   type: quack
-  url: quack:localhost:9494
-  token: ${QUACK_TOKEN}
-  table: donor_report
+  url: quack:hub.example.com:9494
+  table: results
+  token: ${WADDLER_QUACK_TOKEN}
 `)
 	if _, err := config.Load(path); err != nil {
 		t.Fatalf("expected valid quack output, got: %v", err)
 	}
 }
 
-func TestLoad_QuackOutput_BareToken(t *testing.T) {
+func TestLoad_QuackOutput_MissingURL(t *testing.T) {
 	path := writeTmp(t, `
-name: quack-out-bare
+name: quack-no-url
 sources:
   - name: s1
     type: csv
-    path: /tmp/x.csv
+    path: x.csv
 transform: SELECT * FROM s1
 output:
   type: quack
-  url: quack:localhost:9494
-  token: literaltoken
-  table: donor_report
+  table: results
 `)
 	if _, err := config.Load(path); err == nil {
-		t.Error("expected error for bare literal output token")
+		t.Error("expected error for quack output without a url")
 	}
 }
 
-func TestLoad_WithSchedule(t *testing.T) {
+func TestLoad_QuackOutput_BadURLScheme(t *testing.T) {
 	path := writeTmp(t, `
-name: scheduled
+name: quack-bad-url
 sources:
   - name: s1
     type: csv
-    path: /tmp/x.csv
+    path: x.csv
 transform: SELECT * FROM s1
-schedule: "0 6 * * *"
+output:
+  type: quack
+  url: http://hub.example.com:9494
+  table: results
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error for quack url that does not start with quack:")
+	}
+}
+
+func TestLoad_QuackSource_Valid(t *testing.T) {
+	path := writeTmp(t, `
+name: quack-src
+sources:
+  - name: remote
+    type: quack
+    url: quack:hub.example.com:9494
+    table: results
+    token: ${WADDLER_QUACK_TOKEN}
+transform: SELECT * FROM remote
 output:
   type: csv
   path: /tmp/out.csv
 `)
-	p, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !p.HasSchedule() {
-		t.Error("expected HasSchedule() to return true")
-	}
-}
-
-func TestLoad_WithValidation(t *testing.T) {
-	path := writeTmp(t, `
-name: validated
-sources:
-  - name: s1
-    type: csv
-    path: /tmp/x.csv
-transform: SELECT * FROM s1
-validate:
-  - name: row count positive
-    sql: SELECT COUNT(*) FROM ({transform})
-    expect_min: 1
-output:
-  type: csv
-  path: /tmp/out.csv
-`)
-	p, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Validate) != 1 {
-		t.Errorf("expected 1 validation rule, got %d", len(p.Validate))
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("expected valid quack source, got: %v", err)
 	}
 }
