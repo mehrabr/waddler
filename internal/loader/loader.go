@@ -7,116 +7,143 @@ import (
 
 	"github.com/mehrabr/waddler/internal/config"
 	"github.com/mehrabr/waddler/internal/engine"
+	"github.com/mehrabr/waddler/internal/secret"
+	"github.com/mehrabr/waddler/internal/sqlutil"
 )
 
-func Write(eng *engine.Engine, p *config.Pipeline) (string, error) {
+// Write sends the already-materialized result (resultSQL, e.g.
+// `SELECT * FROM "_waddler_result"`) to the configured output and returns a
+// human-readable description of where it went.
+func Write(eng *engine.Engine, p *config.Pipeline, resultSQL string) (string, error) {
 	out := p.Output
 	switch out.Type {
 	case "parquet":
-		if err := os.MkdirAll(filepath.Dir(out.Path), 0o755); err != nil {
-			return "", fmt.Errorf("loader: create output dir: %w", err)
+		if err := ensureDir(out.Path); err != nil {
+			return "", err
 		}
-		return out.Path, eng.ExportParquet(p.Transform, out.Path, out.Compression)
+		return out.Path, eng.ExportParquet(resultSQL, out.Path, out.Compression)
 	case "csv":
-		if err := os.MkdirAll(filepath.Dir(out.Path), 0o755); err != nil {
-			return "", fmt.Errorf("loader: create output dir: %w", err)
+		if err := ensureDir(out.Path); err != nil {
+			return "", err
 		}
-		return out.Path, eng.ExportCSV(p.Transform, out.Path)
+		return out.Path, eng.ExportCSV(resultSQL, out.Path)
 	case "motherduck":
-		return writeMotherDuck(eng, p)
+		return writeMotherDuck(eng, out, resultSQL)
 	case "quack":
-		return writeQuack(eng, p)
+		return writeQuack(eng, out, resultSQL)
 	default:
 		return "", fmt.Errorf("unknown output type %q", out.Type)
 	}
 }
 
-// writeQuack writes pipeline output to a remote Quack server.
-// The ATTACH alias is "quack_out_<table>" to avoid colliding with source aliases.
-func writeQuack(eng *engine.Engine, p *config.Pipeline) (string, error) {
-	out := p.Output
-	token, err := expandToken(out.Token)
-	if err != nil {
-		return "", fmt.Errorf("loader: quack token: %w", err)
+func ensureDir(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("loader: create output dir: %w", err)
 	}
-	for _, stmt := range []string{"INSTALL quack", "LOAD quack"} {
-		if err := eng.Exec(stmt); err != nil {
-			return "", fmt.Errorf("loader: %w", err)
-		}
-	}
-	alias := "quack_out_" + out.Table
-	attachSQL := fmt.Sprintf("ATTACH '%s?token=%s' AS %s (TYPE quack)", out.URL, token, alias)
-	if err := eng.Exec(attachSQL); err != nil {
-		return "", fmt.Errorf("loader: quack attach: %w", err)
-	}
-
-	var target string
-	if out.Database != "" {
-		target = fmt.Sprintf("%s.%s.%s", alias, out.Database, out.Table)
-	} else {
-		target = fmt.Sprintf("%s.%s", alias, out.Table)
-	}
-
-	var stmt string
-	if out.Mode == "append" {
-		stmt = fmt.Sprintf("INSERT INTO %s BY NAME (%s)", target, p.Transform)
-	} else {
-		stmt = fmt.Sprintf("CREATE OR REPLACE TABLE %s AS (%s)", target, p.Transform)
-	}
-	return fmt.Sprintf("%s/%s", out.URL, out.Table), eng.Exec(stmt)
+	return nil
 }
 
-// writeMotherDuck writes pipeline output to a MotherDuck cloud table.
-// The ATTACH alias is "md_out_<table>" — distinct from source aliases
-// ("md_<name>") so read-from and write-to MotherDuck can coexist.
-func writeMotherDuck(eng *engine.Engine, p *config.Pipeline) (string, error) {
-	token := os.Getenv("MOTHERDUCK_TOKEN")
-	if token == "" {
-		return "", fmt.Errorf("motherduck output requires MOTHERDUCK_TOKEN env var")
+// writeMotherDuck writes the result to a MotherDuck cloud table. The ATTACH
+// alias is "md_out_<table>" so it never collides with a source alias.
+func writeMotherDuck(eng *engine.Engine, out config.Output, resultSQL string) (string, error) {
+	if out.Table == "" {
+		return "", fmt.Errorf("motherduck output requires a 'table' field")
 	}
-	out := p.Output
+	token, err := motherduckToken(out.Token)
+	if err != nil {
+		return "", fmt.Errorf("motherduck output: %w", err)
+	}
 	dbName := out.Database
 	if dbName == "" {
 		dbName = "my_db"
 	}
-	if out.Table == "" {
-		return "", fmt.Errorf("motherduck output requires a 'table' field")
-	}
 	alias := "md_out_" + out.Table
-	attachSQL := fmt.Sprintf("ATTACH 'md:%s?motherduck_token=%s' AS %s", dbName, token, alias)
+	conn := fmt.Sprintf("md:%s?motherduck_token=%s", dbName, token)
+	attachSQL := fmt.Sprintf("ATTACH %s AS %s", sqlutil.QuoteLiteral(conn), sqlutil.QuoteIdent(alias))
 	if err := eng.Exec(attachSQL); err != nil {
-		return "", fmt.Errorf("loader: attach motherduck: %w", err)
+		return "", fmt.Errorf("loader: attach motherduck (check token and database name): %w", err)
 	}
-	var stmt string
-	if out.Mode == "append" {
-		ensureSQL := fmt.Sprintf(
-			"CREATE TABLE IF NOT EXISTS %s.%s AS (%s) WHERE false",
-			alias, out.Table, p.Transform,
-		)
+
+	target := sqlutil.QuoteIdent(alias) + "." + sqlutil.QuoteIdent(out.Table)
+	if err := writeTo(eng, target, out.Mode, resultSQL); err != nil {
+		return "", fmt.Errorf("loader: motherduck: %w", err)
+	}
+	return fmt.Sprintf("motherduck:%s.%s", dbName, out.Table), nil
+}
+
+// writeQuack pushes the result to a DuckDB hub over the native Quack protocol
+// (a `waddler hub`, or any quack_serve endpoint). This replaces the old
+// hand-rolled HTTP relay: results are written with a real ATTACH + INSERT.
+func writeQuack(eng *engine.Engine, out config.Output, resultSQL string) (string, error) {
+	if err := eng.RequireDuckDB(1, 5, 3); err != nil {
+		return "", fmt.Errorf("quack output: %w", err)
+	}
+	if out.Table == "" {
+		return "", fmt.Errorf("quack output requires a 'table' field")
+	}
+	if out.URL == "" {
+		return "", fmt.Errorf("quack output requires a 'url' field (e.g. quack:hub.example.com:9494)")
+	}
+	token, err := quackToken(out.Token)
+	if err != nil {
+		return "", fmt.Errorf("quack output: %w", err)
+	}
+	for _, stmt := range []string{"INSTALL quack", "LOAD quack"} {
+		if err := eng.Exec(stmt); err != nil {
+			return "", fmt.Errorf("loader: load quack extension: %w", err)
+		}
+	}
+	alias := "quack_out"
+	attachSQL := fmt.Sprintf("ATTACH %s AS %s (TYPE quack, TOKEN %s)",
+		sqlutil.QuoteLiteral(out.URL), sqlutil.QuoteIdent(alias), sqlutil.QuoteLiteral(token))
+	if err := eng.Exec(attachSQL); err != nil {
+		return "", fmt.Errorf("loader: attach quack hub (check url and token): %w", err)
+	}
+	target := sqlutil.QuoteIdent(alias) + ".main." + sqlutil.QuoteIdent(out.Table)
+	if err := writeTo(eng, target, out.Mode, resultSQL); err != nil {
+		return "", fmt.Errorf("loader: quack: %w", err)
+	}
+	return fmt.Sprintf("%s/%s", out.URL, out.Table), nil
+}
+
+// writeTo writes resultSQL into an attached target table, in replace (default)
+// or append mode. The result is wrapped in a subquery so a transform ending in
+// ORDER BY / GROUP BY stays valid.
+func writeTo(eng *engine.Engine, target, mode, resultSQL string) error {
+	if mode == "append" {
+		ensureSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s AS SELECT * FROM (%s) AS _src WHERE 1=0", target, resultSQL)
 		if err := eng.Exec(ensureSQL); err != nil {
-			return "", fmt.Errorf("loader: motherduck ensure table: %w", err)
+			return fmt.Errorf("ensure table: %w", err)
 		}
-		stmt = fmt.Sprintf("INSERT INTO %s.%s BY NAME (%s)", alias, out.Table, p.Transform)
-	} else {
-		stmt = fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s AS (%s)", alias, out.Table, p.Transform)
+		insertSQL := fmt.Sprintf("INSERT INTO %s BY NAME SELECT * FROM (%s) AS _src", target, resultSQL)
+		if err := eng.Exec(insertSQL); err != nil {
+			return fmt.Errorf("append: %w", err)
+		}
+		return nil
 	}
-	location := fmt.Sprintf("motherduck:%s.%s", dbName, out.Table)
-	return location, eng.Exec(stmt)
+	replaceSQL := fmt.Sprintf("CREATE OR REPLACE TABLE %s AS %s", target, resultSQL)
+	if err := eng.Exec(replaceSQL); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	return nil
 }
 
-// expandToken resolves ${VAR} references in a token string.
-func expandToken(token string) (string, error) {
-	var missing string
-	result := os.Expand(token, func(key string) string {
-		val := os.Getenv(key)
-		if val == "" && missing == "" {
-			missing = key
-		}
-		return val
-	})
-	if missing != "" {
-		return "", fmt.Errorf("environment variable %q is not set", missing)
+func motherduckToken(field string) (string, error) {
+	if field != "" {
+		return secret.Expand(field)
 	}
-	return result, nil
+	if tok := os.Getenv("MOTHERDUCK_TOKEN"); tok != "" {
+		return tok, nil
+	}
+	return "", fmt.Errorf("set the MOTHERDUCK_TOKEN environment variable, or a token: ${VAR} field")
 }
 
+func quackToken(field string) (string, error) {
+	if field != "" {
+		return secret.Expand(field)
+	}
+	if tok := os.Getenv("WADDLER_QUACK_TOKEN"); tok != "" {
+		return tok, nil
+	}
+	return "", fmt.Errorf("set the WADDLER_QUACK_TOKEN environment variable, or a token: ${VAR} field")
+}

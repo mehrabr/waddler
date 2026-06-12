@@ -12,6 +12,9 @@ import (
 	"github.com/mehrabr/waddler/internal/source"
 )
 
+const resultTable = "_waddler_result"
+const resultSQL = `SELECT * FROM "` + resultTable + `"`
+
 type Result struct {
 	Pipeline   string
 	OutputPath string
@@ -32,8 +35,6 @@ func Run(p *config.Pipeline) (*Result, error) {
 
 	log.Info("starting pipeline", "name", p.Name)
 
-	warnNonLocalQuack(p, log)
-
 	eng, err := engine.New()
 	if err != nil {
 		return nil, fmt.Errorf("runner: open engine: %w", err)
@@ -48,11 +49,15 @@ func Run(p *config.Pipeline) (*Result, error) {
 	}
 
 	log.Info("running transform")
-	rowCount, err := eng.RowCount(p.Transform)
-	if err != nil {
+	if err := eng.Materialize(resultTable, p.Transform); err != nil {
 		return nil, fmt.Errorf(
 			"runner: transform error: %w\n\nCheck your SQL in the 'transform' field", err,
 		)
+	}
+
+	rowCount, err := eng.CountTable(resultTable)
+	if err != nil {
+		return nil, fmt.Errorf("runner: count result: %w", err)
 	}
 
 	if len(p.Validate) > 0 {
@@ -63,7 +68,7 @@ func Run(p *config.Pipeline) (*Result, error) {
 		log.Info("all validation rules passed")
 	}
 
-	outputPath, err := loader.Write(eng, p)
+	outputPath, err := loader.Write(eng, p, resultSQL)
 	if err != nil {
 		return nil, fmt.Errorf("runner: output: %w", err)
 	}
@@ -81,31 +86,10 @@ func Run(p *config.Pipeline) (*Result, error) {
 	return result, nil
 }
 
-// warnNonLocalQuack logs an SSL warning for any quack URL that isn't localhost.
-func warnNonLocalQuack(p *config.Pipeline, log *slog.Logger) {
-	check := func(url string) {
-		lower := strings.ToLower(url)
-		local := strings.Contains(lower, "localhost") || strings.Contains(lower, "127.0.0.1")
-		if !local {
-			log.Warn("WARNING: quack URL is non-local. Use nginx with SSL termination in production. See README for a working nginx config.", "url", url)
-		}
-	}
-	for _, s := range p.Sources {
-		if s.Type == "quack" {
-			check(s.URL)
-		}
-	}
-	if p.Output.Type == "quack" {
-		check(p.Output.URL)
-	}
-}
-
-// runAssertions runs each validate[] rule. All failures are collected
-// before returning so the user sees every problem in one shot.
 func runAssertions(eng *engine.Engine, p *config.Pipeline) error {
 	var errs []string
 	for _, a := range p.Validate {
-		q := strings.ReplaceAll(a.SQL, "{transform}", p.Transform)
+		q := strings.ReplaceAll(a.SQL, "{transform}", resultSQL)
 		n, err := eng.ScalarInt64(q)
 		if err != nil {
 			return fmt.Errorf("assertion %q: %w", a.Name, err)
