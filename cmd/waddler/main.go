@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/robfig/cron/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/mehrabr/waddler/internal/config"
-	"github.com/mehrabr/waddler/internal/relay"
+	"github.com/mehrabr/waddler/internal/hub"
 	"github.com/mehrabr/waddler/internal/runner"
 )
 
@@ -23,7 +22,7 @@ func main() {
 		Short:   "Zero-code ETL pipelines powered by DuckDB",
 		Version: version,
 	}
-	root.AddCommand(cmdRun(), cmdValidate(), cmdServe(), cmdSources(), cmdRelay())
+	root.AddCommand(cmdRun(), cmdValidate(), cmdServe(), cmdSources(), cmdHub())
 	if err := root.Execute(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -44,10 +43,7 @@ func cmdRun() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("❌ pipeline failed: %w", err)
 			}
-			fmt.Printf("\n✅ %s — %d rows → %s (%s)\n",
-				result.Pipeline, result.RowsOut,
-				result.OutputPath, result.Duration.Round(1),
-			)
+			fmt.Printf("\n✅ %s\n", result)
 			return nil
 		},
 	}
@@ -80,9 +76,7 @@ func cmdServe() *cobra.Command {
 				return err
 			}
 			if !p.HasSchedule() {
-				return fmt.Errorf(
-					"no 'schedule' field in pipeline — add e.g. schedule: \"0 6 * * *\"",
-				)
+				return fmt.Errorf("no 'schedule' field in pipeline — add e.g. schedule: \"0 6 * * *\"")
 			}
 			c := cron.New()
 			if _, err := c.AddFunc(p.Schedule, func() {
@@ -94,11 +88,33 @@ func cmdServe() *cobra.Command {
 			}
 			c.Start()
 			slog.Info("scheduler started", "schedule", p.Schedule, "pipeline", p.Name)
-			fmt.Printf("⏰ Scheduler running — %s on %q. Press Ctrl+C to stop.\n",
-				p.Name, p.Schedule)
+			fmt.Printf("⏰ Scheduler running — %s on %q. Press Ctrl+C to stop.\n", p.Name, p.Schedule)
 			select {}
 		},
 	}
+}
+
+func cmdHub() *cobra.Command {
+	var (
+		dbPath    string
+		listen    string
+		tokenFile string
+	)
+	cmd := &cobra.Command{
+		Use:   "hub",
+		Short: "Serve a DuckDB database over Quack so other waddler runs can push to it",
+		Long: "Serve a persistent DuckDB file over DuckDB's native Quack protocol.\n" +
+			"Branch pipelines push results to it with a `quack` output. The auth\n" +
+			"token is written to --token-file on first start; share it with clients\n" +
+			"as the WADDLER_QUACK_TOKEN environment variable.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return hub.Serve(hub.Config{DBPath: dbPath, Listen: listen, TokenFile: tokenFile})
+		},
+	}
+	cmd.Flags().StringVar(&dbPath, "db", "./hub.duckdb", "path to the persistent DuckDB file the hub serves")
+	cmd.Flags().StringVar(&listen, "listen", "0.0.0.0:9494", "host:port to serve Quack on")
+	cmd.Flags().StringVar(&tokenFile, "token-file", "./hub.token", "file holding the hub auth token (created on first start)")
+	return cmd
 }
 
 func cmdSources() *cobra.Command {
@@ -110,69 +126,24 @@ func cmdSources() *cobra.Command {
   csv        — local CSV file (path required)
   json       — local JSON file (path required)
   parquet    — local Parquet file (path required)
-  postgres   — PostgreSQL table (dsn + table required)
-  motherduck — MotherDuck cloud table (MOTHERDUCK_TOKEN env + table required)
-  quack      — remote waddler relay or Quack server (url + table required)
+  postgres   — PostgreSQL table (dsn + table required; dsn may use ${VAR})
+  motherduck — MotherDuck cloud table (table required; MOTHERDUCK_TOKEN env or token: ${VAR})
+  quack      — table on a waddler hub over Quack (url + table required; WADDLER_QUACK_TOKEN env or token: ${VAR})
 
 Outputs:
-  parquet    — local Parquet file (path required)
+  parquet    — local Parquet file (path required; optional compression)
   csv        — local CSV file (path required)
-  motherduck — MotherDuck cloud table (database + table required)
-  quack      — remote waddler relay or Quack server (url + table required)
+  motherduck — MotherDuck cloud table (table required; mode: replace|append)
+  quack      — table on a waddler hub over Quack (url + table required; mode: replace|append)
 
 Schedule field (optional):
   Standard cron expression, e.g. "0 6 * * *" (daily at 6am).
-  Use with: waddler serve pipeline.yml`)
+  Use with: waddler serve pipeline.yml
+
+Run a hub:
+  waddler hub --listen 0.0.0.0:9494 --token-file hub.token`)
 		},
 	}
-}
-
-func cmdRelay() *cobra.Command {
-	var (
-		dbPath           string
-		port             int
-		tokenFile        string
-		allowedPipelines string
-		maxRows          int64
-	)
-
-	cmd := &cobra.Command{
-		Use:   "relay",
-		Short: "Start a Quack-backed hub that accepts pipeline writes from remote waddler instances",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := relay.Config{
-				DBPath:    dbPath,
-				Port:      port,
-				TokenFile: tokenFile,
-				MaxRows:   maxRows,
-			}
-			if allowedPipelines != "" {
-				for _, name := range strings.Split(allowedPipelines, ",") {
-					cfg.AllowedPipelines = append(cfg.AllowedPipelines, strings.TrimSpace(name))
-				}
-			}
-
-			if len(cfg.AllowedPipelines) == 0 {
-				slog.Warn("WARNING: no --allowed-pipelines set. Any client with the token can write any pipeline to this relay. Set --allowed-pipelines in production.")
-			}
-
-			slog.Info("relay starting",
-				"db", dbPath,
-				"port", port,
-				"token_file", tokenFile,
-				"max_rows", maxRows,
-			)
-			return relay.Serve(cfg)
-		},
-	}
-
-	cmd.Flags().StringVar(&dbPath, "db", "./hub.duckdb", "path to the persistent DuckDB file")
-	cmd.Flags().IntVar(&port, "port", 9494, "port to listen on")
-	cmd.Flags().StringVar(&tokenFile, "token-file", "./relay.token", "file containing the relay auth token (created on first start)")
-	cmd.Flags().StringVar(&allowedPipelines, "allowed-pipelines", "", "comma-separated list of pipeline names allowed to write to this relay")
-	cmd.Flags().Int64Var(&maxRows, "max-rows", 10_000_000, "maximum rows accepted per pipeline run")
-
-	return cmd
 }
 
 // Build:   CGO_ENABLED=1 go build -o waddler ./cmd/waddler
