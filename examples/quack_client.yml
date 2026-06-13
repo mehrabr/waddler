@@ -1,0 +1,36 @@
+name: branch-office-donor-push
+description: |
+  Clean local donations and push the result to a central waddler hub over the
+  native Quack protocol.
+
+  1. On the hub machine:
+       waddler hub --listen 0.0.0.0:9494 --token-file hub.token
+  2. Share hub.token with this client and run from the examples/ directory:
+       export WADDLER_QUACK_TOKEN="$(cat hub.token)"
+       waddler run quack_client.yml
+
+sources:
+  - name: donations
+    type: csv
+    path: data/donations.csv
+  - name: donors
+    type: csv
+    path: data/donors.csv
+
+transform: |
+  SELECT
+    d.donor_id,
+    dn.name,
+    ROUND(SUM(d.amount), 2) AS total_donated,
+    COUNT(*)                AS donation_count
+  FROM donations d
+  JOIN donors dn USING (donor_id)
+  WHERE d.amount > 0
+  GROUP BY ALL
+
+output:
+  type: quack
+  url: quack:localhost:9494
+  table: donor_report
+  mode: replace
+  token: ${WADDLER_QUACK_TOKEN}
