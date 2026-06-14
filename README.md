@@ -10,16 +10,19 @@ name: monthly-donor-report
 sources:
   - name: donations
     type: csv
-    path: data/donations.csv
+    path: data/donations_2024.csv
   - name: donors
     type: csv
     path: data/donors.csv
 transform: |
-  SELECT dn.name, ROUND(SUM(d.amount), 2) AS total_donated
+  SELECT d.donor_id, dn.name, ROUND(SUM(d.amount), 2) AS total_donated,
+         COUNT(*) AS donation_count,
+         CASE WHEN SUM(d.amount) >= 1000 THEN 'major'
+              WHEN SUM(d.amount) >= 100  THEN 'regular'
+              ELSE 'small' END AS donor_tier
   FROM donations d JOIN donors dn USING (donor_id)
   WHERE d.amount > 0
-  GROUP BY ALL
-  ORDER BY total_donated DESC
+  GROUP BY ALL ORDER BY total_donated DESC
 output:
   type: parquet
   path: output/donor_report.parquet
@@ -27,7 +30,7 @@ output:
 
 ```
 waddler run donor_report.yml
-✅ monthly-donor-report — 3 rows → output/donor_report.parquet (12ms)
+✅ monthly-donor-report: 2 rows → output/donor_report.parquet in 22ms
 ```
 
 ## Install
@@ -89,6 +92,7 @@ A pipeline file has up to six top-level keys:
 | `parquet` | `path` | local Parquet |
 | `postgres` | `dsn`, `table` | `dsn` may use `${VAR}`; optional `options.schema` (default `public`) |
 | `motherduck` | `table` | `MOTHERDUCK_TOKEN` env or `token: ${VAR}`; optional `database` (default `my_db`) |
+| `quack` | `url`, `table` | reads a table from a `waddler hub`; `WADDLER_QUACK_TOKEN` env or `token: ${VAR}` |
 
 ### Outputs
 
@@ -97,6 +101,7 @@ A pipeline file has up to six top-level keys:
 | `parquet` | `path` | optional `compression`: snappy (default), zstd, gzip, lz4, uncompressed |
 | `csv` | `path` | header row included |
 | `motherduck` | `table` | `mode`: `replace` (default) or `append`; optional `database` |
+| `quack` | `url`, `table` | pushes to a `waddler hub`; `mode`: `replace` (default) or `append`; `WADDLER_QUACK_TOKEN` env or `token: ${VAR}` |
 
 ### Validation
 
